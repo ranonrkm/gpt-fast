@@ -304,7 +304,6 @@ def main(
                     model,
                     encoded,
                     decode_length,
-                    device,
                     temperature=temperature,
                     top_k=top_k,
                 )        
