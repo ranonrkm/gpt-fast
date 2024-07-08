@@ -315,7 +315,7 @@ def main(
             t = time.perf_counter() - t0
 
             if i >= 0:
-                avg_latency += tg / decode_length
+                avg_latency += tg / (decode_length - 1)
 
         else:
             device_sync(device=device)
