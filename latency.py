@@ -116,10 +116,14 @@ def generate(
 
     input_pos = torch.tensor([T], device=device, dtype=torch.int)
 
+    torch.cuda.synchronize(device) # MKG
+    t0 = time.perf_counter()
     generated_tokens, _ = decode_n_tokens(model, next_token, input_pos, decode_length - 1, **sampling_kwargs)
+    torch.cuda.synchronize(device) # MKG
+    time_taken = time.perf_counter() - t0
     seq[:, T + 1:] = torch.cat(generated_tokens, dim=-1)
 
-    return seq
+    return seq, time_taken
 
 @torch.no_grad()
 def verify(
@@ -142,9 +146,14 @@ def verify(
     # verify
     input_pos = torch.arange(prefill_length, T, device=device)
     input_ids = prompt[:, prefill_length:]
-    logits = model_forward(model, input_ids, input_pos)
 
-    return sample(logits, **sampling_kwargs)
+    torch.cuda.synchronize(device) # MKG
+    t0 = time.perf_counter()
+    logits = model_forward(model, input_ids, input_pos)
+    torch.cuda.synchronize(device)
+    time_taken = time.perf_counter() - t0
+
+    return sample(logits, **sampling_kwargs), time_taken
 
 
 def encode_tokens(tokenizer, string, bos=True, device=default_device):
@@ -282,6 +291,7 @@ def main(
         encoded = encoded.to(device=device)
 
         if mode == "decode":
+            device_sync(device=device)
             t0 = time.perf_counter()
             import contextlib
             if (i != num_samples - 1 or not profile) or (use_tp and rank != 0):
@@ -290,10 +300,11 @@ def main(
                 torch.profiler._utils._init_for_cuda_graphs()
                 prof = torch.profiler.profile()
             with prof:
-                y = generate(
+                y, tg = generate(
                     model,
                     encoded,
                     decode_length,
+                    device,
                     temperature=temperature,
                     top_k=top_k,
                 )        
@@ -303,9 +314,12 @@ def main(
 
             device_sync(device=device) # MKG
             t = time.perf_counter() - t0
-            avg_latency += t / decode_length
+
+            if i >= 0:
+                avg_latency += tg / decode_length
 
         else:
+            device_sync(device=device)
             t0 = time.perf_counter()
             import contextlib
             if (i != num_samples - 1 or not profile) or (use_tp and rank != 0):
@@ -314,7 +328,7 @@ def main(
                 torch.profiler._utils._init_for_cuda_graphs()
                 prof = torch.profiler.profile()
             with prof:
-                y = verify(
+                y, tv = verify(
                     model,
                     encoded,
                     decode_length,
@@ -328,7 +342,8 @@ def main(
             device_sync(device=device) # MKG
             t = time.perf_counter() - t0
 
-            avg_latency += t            
+            if i >= 0:
+                avg_latency += tv            
 
     print("Avg latency: ", avg_latency / num_samples) 
 
