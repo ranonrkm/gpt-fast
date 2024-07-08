@@ -282,6 +282,7 @@ def main(
         encoded = encoded.to(device=device)
 
         if mode == "decode":
+            t0 = time.perf_counter()
             import contextlib
             if (i != num_samples - 1 or not profile) or (use_tp and rank != 0):
                 prof = contextlib.nullcontext()
@@ -289,7 +290,6 @@ def main(
                 torch.profiler._utils._init_for_cuda_graphs()
                 prof = torch.profiler.profile()
             with prof:
-                t0 = time.perf_counter()
                 y = generate(
                     model,
                     encoded,
@@ -297,12 +297,12 @@ def main(
                     temperature=temperature,
                     top_k=top_k,
                 )        
-                t = time.perf_counter() - t0
             if i == -1:
                 print(f"Compilation time: {time.perf_counter() - t0:.2f} seconds")
                 continue   
 
             device_sync(device=device) # MKG
+            t = time.perf_counter() - t0
             avg_latency += t / decode_length
 
         else:
