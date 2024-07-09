@@ -130,12 +130,13 @@ def verify(
     model: Transformer,
     prompt: torch.Tensor,
     decode_length: int,
+    niter: int = 1,
     **sampling_kwargs
 ):
     B, T = prompt.shape
     prefill_length = T - decode_length
     input_ids = prompt[:, :prefill_length]
-
+    
     device, dtype = prompt.device, prompt.dtype
     with torch.device(device):
         model.setup_caches(max_batch_size=B, max_seq_length=T)
@@ -149,11 +150,14 @@ def verify(
 
     torch.cuda.synchronize(device) # MKG
     t0 = time.perf_counter()
-    logits = model_forward(model, input_ids, input_pos)
+
+    for _ in range(niter):
+        model_forward(model, input_ids, input_pos).clone()
+
     torch.cuda.synchronize(device)
     time_taken = time.perf_counter() - t0
 
-    return sample(logits, **sampling_kwargs), time_taken
+    return time_taken / niter
 
 
 def encode_tokens(tokenizer, string, bos=True, device=default_device):
@@ -269,8 +273,9 @@ def main(
 
     torch.manual_seed(1234)
     if compile:
-        global decode_one_token, prefill
+        global decode_one_token, prefill, model_forward
         decode_one_token = torch.compile(decode_one_token, mode="reduce-overhead", fullgraph=True)
+        model_forward = torch.compile(model_forward, mode="reduce-overhead", fullgraph=True)
 
         # Uncomment to squeeze more perf out of prefill
         if compile_prefill:
@@ -285,12 +290,12 @@ def main(
 
     avg_latency = 0.
 
-    for i in tqdm(range(start, num_samples)):
-        device_sync(device=device) # MKG
-        encoded = tokenized_prompts[i]
-        encoded = encoded.to(device=device)
+    if mode == "decode":
+        for i in tqdm(range(start, num_samples)):
+            device_sync(device=device) # MKG
+            encoded = tokenized_prompts[i]
+            encoded = encoded.to(device=device)
 
-        if mode == "decode":
             device_sync(device=device)
             t0 = time.perf_counter()
             import contextlib
@@ -317,7 +322,10 @@ def main(
             if i >= 0:
                 avg_latency += tg / (decode_length - 1)
 
-        else:
+    else:
+        encoded = tokenized_prompts[0]
+        encoded = encoded.to(device=device)
+        for phase in ['compile', 'eval']:
             device_sync(device=device)
             t0 = time.perf_counter()
             import contextlib
@@ -327,24 +335,21 @@ def main(
                 torch.profiler._utils._init_for_cuda_graphs()
                 prof = torch.profiler.profile()
             with prof:
-                y, tv = verify(
+                tv = verify(
                     model,
                     encoded,
                     decode_length,
+                    niter=num_samples,
                     temperature=temperature,
                     top_k=top_k,
                 )
-            if i == -1:
+            if phase == 'compile' :
                 print(f"Compilation time: {time.perf_counter() - t0:.2f} seconds")
                 continue   
+            else:
+                avg_latency = tv            
 
-            device_sync(device=device) # MKG
-            t = time.perf_counter() - t0
-
-            if i >= 0:
-                avg_latency += tv            
-
-    print("Avg latency: ", avg_latency / num_samples) 
+    print("Avg latency: ", avg_latency) 
 
 
 if __name__ == "__main__":
